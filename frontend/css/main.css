@@ -1,0 +1,162 @@
+/* Modern BPMN Workflow Analysis & Optimization Dashboard Styles */
+
+:root {
+  --primary-color: #1e3a8a;
+  --primary-light: #3b82f6;
+  --secondary-color: #0f172a;
+  --accent-color: #06b6d4;
+  --success-color: #10b981;
+  --warning-color: #f59e0b;
+  --danger-color: #ef4444;
+  --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  --card-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.navbar-brand-custom {
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  background: linear-gradient(90deg, #ffffff, #93c5fd);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-banner {
+  background: linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%);
+  color: white;
+  padding: 2.5rem 1rem 2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.15);
+}
+
+.upload-card {
+  background: white;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  box-shadow: var(--card-shadow);
+  transition: all 0.2s ease-in-out;
+}
+
+.drop-zone {
+  border: 2px dashed #94a3b8;
+  border-radius: 12px;
+  padding: 2.2rem 1.5rem;
+  text-align: center;
+  background-color: #f8fafc;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.drop-zone:hover, .drop-zone.dragover {
+  border-color: #3b82f6;
+  background-color: #eff6ff;
+  transform: scale(1.005);
+}
+
+.drop-zone-icon {
+  font-size: 3rem;
+  color: #3b82f6;
+  margin-bottom: 0.5rem;
+}
+
+.stat-card {
+  background: white;
+  border-radius: 12px;
+  padding: 1.25rem;
+  border: 1px solid #e2e8f0;
+  box-shadow: var(--card-shadow);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.stat-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+}
+
+.stat-icon-blue { background-color: #dbeafe; color: #1e40af; }
+.stat-icon-green { background-color: #d1fae5; color: #065f46; }
+.stat-icon-purple { background-color: #ede9fe; color: #5b21b6; }
+.stat-icon-amber { background-color: #fef3c7; color: #92400e; }
+
+.bpmn-canvas-wrapper {
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  height: 480px;
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.comparison-table th {
+  background-color: #1e3a8a;
+  color: white;
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+}
+
+.comparison-table td {
+  padding: 0.75rem 1rem;
+  vertical-align: middle;
+}
+
+.badge-improvement {
+  font-size: 0.82rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  font-weight: 600;
+  background-color: #d1fae5;
+  color: #047857;
+}
+
+.badge-neutral {
+  font-size: 0.82rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  font-weight: 600;
+  background-color: #f1f5f9;
+  color: #475569;
+}
+
+.custom-nav-tabs .nav-link {
+  font-weight: 600;
+  color: #64748b;
+  border: none;
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  margin-right: 0.5rem;
+  transition: all 0.15s ease;
+}
+
+.custom-nav-tabs .nav-link.active {
+  background-color: #1e3a8a;
+  color: white;
+}
+
+.custom-nav-tabs .nav-link:hover:not(.active) {
+  background-color: #e2e8f0;
+  color: #1e293b;
+}
+
+.pdf-preview-pane {
+  width: 100%;
+  height: 650px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+}
+

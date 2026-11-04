@@ -1,9 +1,2 @@
-fastapi
-uvicorn[standard]
-networkx
-reportlab
-python-multipart
-pydantic
-lxml
-graphviz
-svglib
+# Runtime entry points are pinned; requirements.lock pins their transitive dependency closure.
+-r requirements.lock

@@ -4,6 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import pathlib
 import traceback
+from dotenv import load_dotenv
+
+load_dotenv(pathlib.Path(__file__).resolve().parents[1] / '.env')
 
 from .optimizer import BPMNParser, WorkflowGraph, PetriNet, PetriNetAnalyzer, IterativeOptimizer
 from .report_builder import build_comparative_pdf_report

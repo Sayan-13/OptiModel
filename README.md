@@ -298,7 +298,10 @@ the parsed BPMN topology and the Petri net used for verification as vector graph
 Very large diagrams are scaled to fit the page and may be difficult to read.
 
 Natural-language workflow generation uses Makerend's OpenAI-compatible API.
-Set `MAKEREND_API_KEY` in the backend process environment before starting it.
+Set `MAKEREND_API_KEY` in the backend process environment or in `backend/.env`
+before starting it. See `backend/.env.example` for the available settings.
+The `.env` file is ignored by Git;
+existing environment variables take precedence over values in the file.
 The default model is `gpt-6.1-terra` and the default API base URL is
 `https://makerend.com/v1`; override these with `MAKEREND_MODEL` and
 `MAKEREND_BASE_URL` when needed. Prompts are sent to Makerend. If generation

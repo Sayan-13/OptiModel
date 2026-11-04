@@ -1553,7 +1553,12 @@ export default function App() {
                               <Timeline
                                 data={data}
                                 onSelect={(id) => {
+                                  const source = models.find(
+                                    (m) => m.id === r.model_id,
+                                  );
+                                  if (source) selectModel(source, r.config);
                                   setSelected(id);
+                                  go("Model");
                                 }}
                               />
                             </div>

@@ -79,6 +79,14 @@ test("import → validate → simulate → optimize → compare → export → r
   await expect(
     page.getByText("identical assumptions", { exact: true }),
   ).toBeVisible();
+  await page
+    .locator(".compare-grid .timeline tbody .text-button")
+    .first()
+    .click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: source.name }),
+  ).toBeVisible();
+  await expect(page.locator(".inspector code")).toHaveText("a_short");
   await page.getByRole("button", { name: "Reports", exact: true }).click();
   const report = page
     .getByRole("link", { name: "PDF report", exact: true })

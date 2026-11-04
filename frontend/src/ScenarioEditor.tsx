@@ -80,7 +80,9 @@ export function ScenarioEditor({
       </div>
       <p className="muted">
         Every task needs a positive duration and an eligible resource role.
-        Missing values remain unknown until you supply them.
+        Missing values remain unknown until you supply them. Capacities are
+        scenario assumptions; imported roles start with one slot until you set
+        them.
       </p>
       <div className="settings-row">
         <label>

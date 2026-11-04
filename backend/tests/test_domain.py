@@ -50,6 +50,18 @@ def test_sequence_reference_7():
     assert result["metrics"]["observed_throughput"] is None
 
 
+def test_bpmn_flow_ids_cannot_collide_with_internal_petri_places():
+    workflow = sequence()
+    workflow.edges[0].id = "source"
+    workflow.edges[1].id = "sink"
+    result = verify(workflow)
+    assert result["status"] == "no_counterexample"
+    net = result["petri_net"]
+    assert len(net["places"]) == len(set(net["places"]))
+    assert net["place_sources"]["flow:source"] == "source"
+    assert net["place_sources"]["flow:sink"] == "sink"
+
+
 @pytest.mark.parametrize("capacity,expected", [(2, 7), (1, 11)])
 def test_parallel_reference(capacity, expected):
     result = simulate(parallel(), config("Operations", capacity))

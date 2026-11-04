@@ -9,11 +9,12 @@ from .domain import Workflow
 
 def to_petri(workflow: Workflow) -> dict:
     require_valid(workflow)
-    places = ["source", *[e.id for e in workflow.edges], "sink"]
+    # Keep source BPMN IDs distinct from internal source/sink place names.
+    places = ["source", *[f"flow:{e.id}" for e in workflow.edges], "sink"]
     transitions = []
     for node in workflow.nodes:
-        incoming = [e.id for e in workflow.edges if e.target == node.id]
-        outgoing = [e.id for e in workflow.edges if e.source == node.id]
+        incoming = [f"flow:{e.id}" for e in workflow.edges if e.target == node.id]
+        outgoing = [f"flow:{e.id}" for e in workflow.edges if e.source == node.id]
         if node.kind == "startEvent":
             incoming = ["source"]
         if node.kind == "endEvent":
@@ -25,7 +26,17 @@ def to_petri(workflow: Workflow) -> dict:
             transitions.append(
                 {"id": f"{node.id}:{index}", "node_id": node.id, "inputs": ins, "outputs": outs}
             )
-    return {"places": places, "transitions": transitions, "initial": {"source": 1}, "final": {"sink": 1}}
+    return {
+        "places": places,
+        "transitions": transitions,
+        "initial": {"source": 1},
+        "final": {"sink": 1},
+        "place_sources": {
+            **{f"flow:{e.id}": e.id for e in workflow.edges},
+            "source": next(n.id for n in workflow.nodes if n.kind == "startEvent"),
+            "sink": next(n.id for n in workflow.nodes if n.kind == "endEvent"),
+        },
+    }
 
 
 def verify(workflow: Workflow, max_states: int = 5000, seconds: float = 2) -> dict:

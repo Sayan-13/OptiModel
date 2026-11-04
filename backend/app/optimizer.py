@@ -4,16 +4,17 @@ Implements all 10 stages:
 1. XML Parsing (Tasks, Gateways, Events, Flows, Durations, Resources)
 2. Workflow Graph Modeling (NetworkX)
 3. Petri-Net Conversion (Places, Transitions, Arcs, Markings)
-4. Initial Analysis (Deadlocks, Reachability, Concurrency, Soundness)
+4. Initial Analysis (Bounded Deadlock and Reachability Checks, Concurrency)
 5. Timed Discrete-Event Simulation (Task execution, Resource Allocation, Queuing)
 6. Metric Calculation (Makespan, Throughput, Utilization, Waiting, Bottlenecks, etc.)
 7. Problem Identification (Inefficiencies, Critical Path, Contention)
-8. Iterative Optimization Engine (Rescheduling, Resource Balancing, Concurrency Tuning)
+8. Candidate Scenario Evaluation (Scheduling and Worker-Pool Assumptions)
 9. Re-simulation and Candidate Evaluation
 10. Final Summary, Metrics Comparison & BPMN XML Generation
 """
 
 import xml.etree.ElementTree as ET
+import re
 import networkx as nx
 import copy
 import math
@@ -50,7 +51,11 @@ class BPMNParser:
         for tag in cls.TASK_TAGS:
             for elem in root.findall(f'.//bpmn:{tag}', cls.NAMESPACES):
                 elem_id = elem.attrib.get('id', '')
+                if not elem_id:
+                    raise ValueError(f"BPMN {tag} element is missing its required id.")
                 elem_name = elem.attrib.get('name', elem_id)
+                properties = elem.findall('.//{http://camunda.org/schema/1.0/bpmn}property')
+                property_values = {item.attrib.get('name', '').lower(): item.attrib.get('value', '') for item in properties}
                 # Duration: check attribute, child element or documentation
                 duration = 1.0
                 if 'duration' in elem.attrib:
@@ -59,16 +64,21 @@ class BPMNParser:
                     except ValueError:
                         pass
                 else:
+                    # Camunda properties are commonly used to carry simulation metadata.
+                    if property_values.get('duration'):
+                        try:
+                            duration = float(property_values['duration'])
+                        except ValueError:
+                            pass
                     # check for documentation or custom properties
                     doc = elem.find('bpmn:documentation', cls.NAMESPACES)
-                    if doc is not None and doc.text:
-                        import re
+                    if duration == 1.0 and doc is not None and doc.text:
                         m = re.search(r'duration\s*[:=]\s*([0-9.]+)', doc.text, re.IGNORECASE)
                         if m:
                             duration = float(m.group(1))
 
                 # Resource requirements
-                resource = elem.attrib.get('resource', elem.attrib.get('candidateGroups', 'Worker_Pool'))
+                resource = elem.attrib.get('resource', elem.attrib.get('candidateGroups', property_values.get('resource', 'Worker_Pool')))
                 
                 tasks.append({
                     'id': elem_id,
@@ -106,12 +116,21 @@ class BPMNParser:
 
         flows = []
         for elem in root.findall('.//bpmn:sequenceFlow', cls.NAMESPACES):
+            if not elem.attrib.get('id') or not elem.attrib.get('sourceRef') or not elem.attrib.get('targetRef'):
+                raise ValueError("Every BPMN sequenceFlow must have id, sourceRef and targetRef attributes.")
             flows.append({
                 'id': elem.attrib.get('id', ''),
                 'name': elem.attrib.get('name', ''),
                 'sourceRef': elem.attrib.get('sourceRef', ''),
                 'targetRef': elem.attrib.get('targetRef', '')
             })
+
+        known_ids = {item['id'] for item in tasks + gateways + events}
+        for flow in flows:
+            if flow['sourceRef'] not in known_ids or flow['targetRef'] not in known_ids:
+                raise ValueError(f"Sequence flow {flow['id']} references an unknown BPMN element.")
+        if not tasks:
+            raise ValueError("No executable BPMN tasks were found.")
 
         return {
             'tasks': tasks,
@@ -206,6 +225,10 @@ class PetriNet:
         # Elements become transitions
         all_elements = parsed['tasks'] + parsed['gateways'] + parsed['events']
         for elem in all_elements:
+            if elem['type'] in ('inclusiveGateway', 'eventBasedGateway', 'complexGateway'):
+                raise ValueError(f"{elem['type']} '{elem['id']}' is not supported by the Petri-net converter.")
+            if elem['type'] == 'exclusiveGateway':
+                continue
             t_id = f"t_{elem['id']}"
             net.transitions[t_id] = {
                 'id': t_id,
@@ -213,20 +236,52 @@ class PetriNet:
                 'name': elem['name'],
                 'type': elem['type'],
                 'duration': elem.get('duration', 0.0),
-                'resource': elem.get('resource', None)
+                'resource': elem.get('resource', None),
+                'incoming': elem.get('incoming', []),
+                'outgoing': elem.get('outgoing', [])
             }
 
-        # Connect places and transitions via arcs
+        # Connect places and transitions. Parallel gateways are AND transitions;
+        # XOR gateways are expanded into a transition for each input/output pair.
+        flow_ids = set()
         for flow in parsed['flows']:
             p_id = f"p_{flow['id']}"
+            if p_id in flow_ids:
+                raise ValueError(f"Duplicate BPMN sequence flow id: {flow['id']}")
+            flow_ids.add(p_id)
             t_src = f"t_{flow['sourceRef']}"
             t_tgt = f"t_{flow['targetRef']}"
-            if t_src in net.transitions:
+            source = next((g for g in parsed['gateways'] if g['id'] == flow['sourceRef']), None)
+            target = next((g for g in parsed['gateways'] if g['id'] == flow['targetRef']), None)
+            if source is None and t_src in net.transitions:
                 net.arcs.append((t_src, p_id))
-            if t_tgt in net.transitions:
+            if target is None and t_tgt in net.transitions:
                 net.arcs.append((p_id, t_tgt))
 
-        # Add explicit initial and final places if needed
+        for gateway in parsed['gateways']:
+            if gateway['type'] == 'parallelGateway':
+                t_id = f"t_{gateway['id']}"
+                for flow_id in gateway.get('incoming', []):
+                    net.arcs.append((f"p_{flow_id}", t_id))
+                for flow_id in gateway.get('outgoing', []):
+                    net.arcs.append((t_id, f"p_{flow_id}"))
+            elif gateway['type'] == 'exclusiveGateway':
+                incoming = gateway.get('incoming', [])
+                outgoing = gateway.get('outgoing', [])
+                if not incoming or not outgoing:
+                    raise ValueError(f"Exclusive gateway '{gateway['id']}' must have incoming and outgoing flows.")
+                for in_index, in_flow in enumerate(incoming):
+                    for out_index, out_flow in enumerate(outgoing):
+                        t_id = f"t_{gateway['id']}_{in_index + 1}_{out_index + 1}"
+                        net.transitions[t_id] = {
+                            'id': t_id, 'elem_id': gateway['id'], 'name': gateway['name'],
+                            'type': gateway['type'], 'duration': 0.0, 'resource': None,
+                        }
+                        net.arcs.extend([(f"p_{in_flow}", t_id), (t_id, f"p_{out_flow}")])
+
+        # Give every BPMN element a transition. The synthetic source/sink places
+        # make event transitions consume/produce tokens just like other nodes.
+        # Add explicit initial and final places.
         start_nodes = wf.get_start_nodes()
         if start_nodes:
             p_start = "p_start_source"
@@ -250,6 +305,16 @@ class PetriNet:
 
         return net
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serializable representation of this ordinary Petri net."""
+        return {
+            'places': list(self.places.values()),
+            'transitions': list(self.transitions.values()),
+            'arcs': [{'source': source, 'target': target} for source, target in self.arcs],
+            'initial_marking': self.initial_marking,
+            'final_marking': self.final_marking,
+        }
+
 
 # ============================================================================
 # STAGE 4: Initial Formal Verification & State-Space Exploration
@@ -263,6 +328,8 @@ class PetriNetAnalyzer:
 
     def explore_state_space(self, max_states: int = 5000) -> Dict[str, Any]:
         """BFS state space exploration over discrete Petri-net markings."""
+        if max_states < 1:
+            raise ValueError("max_states must be at least 1.")
         # Precompute transition input/output places
         trans_inputs = defaultdict(list)
         trans_outputs = defaultdict(list)
@@ -281,7 +348,8 @@ class PetriNetAnalyzer:
         deadlock_markings = []
         sink_place = "p_sink_end"
 
-        while queue and len(visited) < max_states:
+        truncated = False
+        while queue:
             current = queue.popleft()
             curr_dict = dict(current)
             reachable_markings.append(curr_dict)
@@ -309,17 +377,28 @@ class PetriNetAnalyzer:
                         new_dict[p] = new_dict.get(p, 0) + 1
                     new_tuple = tuple(sorted(new_dict.items()))
                     if new_tuple not in visited:
+                        if len(visited) >= max_states:
+                            truncated = True
+                            queue.clear()
+                            break
                         visited.add(new_tuple)
                         queue.append(new_tuple)
 
         # Soundness: Can always reach end, and at final state no tokens left behind
-        is_sound = (len(deadlock_markings) == 0 and len(reachable_markings) > 0)
+        has_proper_final_marking = any(
+            marking.get(sink_place, 0) == 1 and
+            sum(tokens for place, tokens in marking.items() if place != sink_place) == 0
+            for marking in reachable_markings
+        )
+        is_sound = (not truncated and len(queue) == 0 and len(deadlock_markings) == 0 and
+                    len(reachable_markings) > 0 and has_proper_final_marking)
 
         return {
-            'total_reachable_states': len(reachable_markings),
+            'total_reachable_states': len(visited),
             'deadlock_states': len(deadlock_markings),
             'is_sound': is_sound,
-            'deadlocks': deadlock_markings[:5]  # first few samples
+            'deadlocks': deadlock_markings[:5],  # first few samples
+            'truncated': truncated,
         }
 
     def compute_concurrency_degree(self, wf: WorkflowGraph) -> int:
@@ -582,6 +661,20 @@ class IterativeOptimizer:
         self.max_iterations = max_iterations
 
     def run(self) -> Dict[str, Any]:
+        if self.base_resources < 1:
+            raise ValueError("The worker count must be at least 1.")
+        if self.max_iterations < 0:
+            raise ValueError("max_iterations cannot be negative.")
+        if not nx.is_directed_acyclic_graph(self.wf.graph):
+            raise ValueError("Timed simulation does not support BPMN loops; use an acyclic process model.")
+        for node, data in self.wf.graph.nodes(data=True):
+            if data.get('subtype') == 'exclusiveGateway' and (
+                self.wf.graph.in_degree(node) > 1 or self.wf.graph.out_degree(node) > 1
+            ):
+                raise ValueError(
+                    "Optimization simulation does not model exclusive-gateway conditions. "
+                    "The BPMN can still be converted with /convert-to-petri-net."
+                )
         # Baseline analysis
         net = PetriNet.from_workflow(self.wf)
         analyzer = PetriNetAnalyzer(net)
@@ -614,123 +707,77 @@ class IterativeOptimizer:
         current_resources = self.base_resources
         current_durations = {}
 
-        # Critical path calculation
-        task_nodes = [n for n, d in self.wf.graph.nodes(data=True) if d.get('category') == 'task']
+        # Preserve original task durations in every scheduling/capacity scenario.
         for s in baseline_sim['schedule']:
             current_durations[s['id']] = s['duration']
 
-        # Iteration 1: Task Rescheduling (Critical-Path-First / Longest-Processing-Time)
-        # Give higher priority to tasks with longer durations or critical path position
-        iter1_priorities = {t: current_durations.get(t, 1.0) * 10.0 for t in task_nodes}
-        sim_iter1 = sim.simulate(task_priorities=iter1_priorities, duration_overrides=current_durations)
-        m_iter1 = MetricsCalculator.calculate(self.wf, net_analysis, sim_iter1, max_conc)
-        imp1 = round(((baseline_metrics['makespan'] - m_iter1['makespan']) / baseline_metrics['makespan']) * 100, 2) if baseline_metrics['makespan'] > 0 else 0
-        iteration_history.append({
-            'iteration': 1,
-            'strategy': 'Critical-Path-First Rescheduling',
-            'description': 'Prioritized bottleneck and critical tasks to minimize downstream dependency waiting',
-            'makespan': m_iter1['makespan'],
-            'waiting_time': m_iter1['average_waiting_time'],
-            'utilization': m_iter1['resource_utilization'],
-            'improvement_pct': max(0.0, imp1),
-            'status': 'Accepted' if m_iter1['makespan'] <= best_metrics['makespan'] else 'Retained'
-        })
-        if m_iter1['makespan'] < best_metrics['makespan'] or (m_iter1['makespan'] == best_metrics['makespan'] and m_iter1['average_waiting_time'] <= best_metrics['average_waiting_time']):
-            best_metrics = m_iter1
-            best_sim = sim_iter1
-            best_iteration = 1
-            best_strategy = 'Critical-Path-First Rescheduling'
-            current_priorities = iter1_priorities
+        def finalize() -> Dict[str, Any]:
+            overall_improvement = round(((baseline_metrics['makespan'] - best_metrics['makespan']) /
+                                         baseline_metrics['makespan'] * 100), 2) if baseline_metrics['makespan'] > 0 else 0.0
+            return {
+                'baseline_metrics': baseline_metrics,
+                'optimized_metrics': best_metrics,
+                'baseline_schedule': baseline_sim['schedule'],
+                'optimized_schedule': best_sim['schedule'],
+                'iteration_history': iteration_history,
+                'total_iterations': len(iteration_history),
+                'best_iteration': best_iteration,
+                'best_strategy': best_strategy,
+                'overall_improvement_pct': overall_improvement,
+                'problems_identified': baseline_problems,
+                # The candidates change simulated scheduling/capacity assumptions, not BPMN
+                # task semantics. Export the submitted model without invented duration edits.
+                'optimized_bpmn_xml': self.wf.data.get('raw_xml', ''),
+                'net_analysis': net_analysis,
+                'workflow': {key: value for key, value in self.wf.data.items() if key != 'raw_xml'},
+            }
 
-        # Iteration 2: Resource Pool Optimization & Contention Elimination
-        # Add 1 dedicated worker or reallocate to resolve resource conflicts if any exist
-        opt_resources = self.base_resources + (1 if baseline_metrics['resource_conflicts'] > 0 or max_conc > self.base_resources else 0)
-        sim_res = DiscreteEventSimulator(self.wf, num_resources=opt_resources)
-        sim_iter2 = sim_res.simulate(task_priorities=current_priorities, duration_overrides=current_durations)
-        m_iter2 = MetricsCalculator.calculate(self.wf, net_analysis, sim_iter2, max_conc)
-        imp2 = round(((baseline_metrics['makespan'] - m_iter2['makespan']) / baseline_metrics['makespan']) * 100, 2) if baseline_metrics['makespan'] > 0 else 0
-        iteration_history.append({
-            'iteration': 2,
-            'strategy': 'Resource Reallocation & Capacity Scaling',
-            'description': f'Scaled resource capacity to {opt_resources} workers to eliminate concurrent queuing',
-            'makespan': m_iter2['makespan'],
-            'waiting_time': m_iter2['average_waiting_time'],
-            'utilization': m_iter2['resource_utilization'],
-            'improvement_pct': max(0.0, imp2),
-            'status': 'Accepted' if m_iter2['makespan'] <= best_metrics['makespan'] else 'Retained'
-        })
-        if m_iter2['makespan'] < best_metrics['makespan'] or (m_iter2['makespan'] == best_metrics['makespan'] and m_iter2['average_waiting_time'] < best_metrics['average_waiting_time']):
-            best_metrics = m_iter2
-            best_sim = sim_iter2
-            best_iteration = 2
-            best_strategy = 'Resource Reallocation & Capacity Scaling'
-            current_resources = opt_resources
+        priorities = {task_id: duration * 10.0 for task_id, duration in current_durations.items()}
+        for iteration in range(1, self.max_iterations + 1):
+            # First candidate changes only the scheduling tie-break. Subsequent candidates
+            # model progressively larger worker pools, up to the API's 100-worker limit.
+            resources = self.base_resources if iteration == 1 else min(100, self.base_resources + iteration - 1)
+            candidate_simulator = DiscreteEventSimulator(self.wf, num_resources=resources)
+            candidate_sim = candidate_simulator.simulate(
+                task_priorities=priorities,
+                duration_overrides=current_durations,
+            )
+            candidate_metrics = MetricsCalculator.calculate(self.wf, net_analysis, candidate_sim, max_conc)
+            improvement = round(
+                ((baseline_metrics['makespan'] - candidate_metrics['makespan']) /
+                 baseline_metrics['makespan'] * 100), 2
+            ) if baseline_metrics['makespan'] > 0 else 0.0
+            strategy = ('Longest-task-first scheduling' if iteration == 1 else
+                        f'Hypothetical capacity scenario ({resources} workers)')
+            accepted = (
+                candidate_metrics['makespan'] < best_metrics['makespan'] or
+                (candidate_metrics['makespan'] == best_metrics['makespan'] and
+                 candidate_metrics['average_waiting_time'] < best_metrics['average_waiting_time'])
+            )
+            iteration_history.append({
+                'iteration': iteration,
+                'strategy': strategy,
+                'description': ('Tested a longest-task-first scheduling priority without changing task durations.'
+                                if iteration == 1 else
+                                f'Simulated a worker pool of {resources}; this is a capacity scenario, not an applied deployment change.'),
+                'makespan': candidate_metrics['makespan'],
+                'waiting_time': candidate_metrics['average_waiting_time'],
+                'utilization': candidate_metrics['resource_utilization'],
+                'improvement_pct': improvement,
+                'status': 'Best candidate' if accepted else 'Not better than current best',
+            })
+            if accepted:
+                best_metrics = candidate_metrics
+                best_sim = candidate_sim
+                best_iteration = iteration
+                best_strategy = strategy
+                current_resources = resources
 
-        # Iteration 3: Synchronization Skew Leveling / Bottleneck Mitigation
-        # Reduce the slowest parallel branch duration (e.g. through subtask efficiency or automated assistance)
-        iter3_durations = current_durations.copy()
-        # Find the bottleneck task
-        if baseline_sim['schedule']:
-            longest_task = max(baseline_sim['schedule'], key=lambda x: x['duration'])
-            target_id = longest_task['id']
-            # Compress bottleneck duration by 25-35%
-            iter3_durations[target_id] = round(max(0.5, longest_task['duration'] * 0.7), 2)
+            # Further iterations would repeat the same maximum-capacity simulation.
+            if resources == 100:
+                break
 
-        sim_opt = DiscreteEventSimulator(self.wf, num_resources=current_resources)
-        sim_iter3 = sim_opt.simulate(task_priorities=current_priorities, duration_overrides=iter3_durations)
-        m_iter3 = MetricsCalculator.calculate(self.wf, net_analysis, sim_iter3, max_conc)
-        imp3 = round(((baseline_metrics['makespan'] - m_iter3['makespan']) / baseline_metrics['makespan']) * 100, 2) if baseline_metrics['makespan'] > 0 else 0
-        iteration_history.append({
-            'iteration': 3,
-            'strategy': 'Bottleneck Mitigation & Synchronization Tuning',
-            'description': 'Balanced parallel branch durations and mitigated longest critical activity',
-            'makespan': m_iter3['makespan'],
-            'waiting_time': m_iter3['average_waiting_time'],
-            'utilization': m_iter3['resource_utilization'],
-            'improvement_pct': max(0.0, imp3),
-            'status': 'Accepted' if m_iter3['makespan'] < best_metrics['makespan'] else 'Retained'
-        })
-        if m_iter3['makespan'] < best_metrics['makespan']:
-            best_metrics = m_iter3
-            best_sim = sim_iter3
-            best_iteration = 3
-            best_strategy = 'Bottleneck Mitigation & Synchronization Tuning'
-            current_durations = iter3_durations
-
-        # Iteration 4: Load Balancing & Idle Time Elimination
-        sim_iter4 = sim_opt.simulate(task_priorities=current_priorities, duration_overrides=current_durations)
-        m_iter4 = MetricsCalculator.calculate(self.wf, net_analysis, sim_iter4, max_conc)
-        imp4 = round(((baseline_metrics['makespan'] - m_iter4['makespan']) / baseline_metrics['makespan']) * 100, 2) if baseline_metrics['makespan'] > 0 else 0
-        iteration_history.append({
-            'iteration': 4,
-            'strategy': 'Load Balancing & Verification',
-            'description': 'Verified global schedule convergence and balanced worker allocations',
-            'makespan': m_iter4['makespan'],
-            'waiting_time': m_iter4['average_waiting_time'],
-            'utilization': m_iter4['resource_utilization'],
-            'improvement_pct': max(0.0, imp4),
-            'status': 'Optimal Target Achieved'
-        })
-
-        overall_improvement = round(((baseline_metrics['makespan'] - best_metrics['makespan']) / baseline_metrics['makespan'] * 100), 2) if baseline_metrics['makespan'] > 0 else 0.0
-
-        # Generate optimized BPMN XML
-        optimized_bpmn_xml = self._generate_optimized_xml(current_durations, current_resources)
-
-        return {
-            'baseline_metrics': baseline_metrics,
-            'optimized_metrics': best_metrics,
-            'baseline_schedule': baseline_sim['schedule'],
-            'optimized_schedule': best_sim['schedule'],
-            'iteration_history': iteration_history,
-            'total_iterations': len(iteration_history),
-            'best_iteration': best_iteration,
-            'best_strategy': best_strategy,
-            'overall_improvement_pct': overall_improvement,
-            'problems_identified': baseline_problems,
-            'optimized_bpmn_xml': optimized_bpmn_xml,
-            'net_analysis': net_analysis
-        }
+        return finalize()
 
     def _generate_optimized_xml(self, durations: Dict[str, float], resources: int) -> str:
         """Injects optimized durations and resource annotations into the BPMN XML adhering strictly to standard BPMN 2.0 schema."""
@@ -854,4 +901,3 @@ class IterativeOptimizer:
             return ET.tostring(root, encoding='utf-8').decode('utf-8')
         except Exception as ex:
             return raw_xml
-

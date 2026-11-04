@@ -5,10 +5,17 @@ import uvicorn
 import pathlib
 import traceback
 
-from .optimizer import BPMNParser, WorkflowGraph, IterativeOptimizer
+from .optimizer import BPMNParser, WorkflowGraph, PetriNet, PetriNetAnalyzer, IterativeOptimizer
 from .report_builder import build_comparative_pdf_report
 from .nlp_generator import ProcessNLPGenerator
 from pydantic import BaseModel
+
+
+def _validate_request(workers: int, max_iterations: int):
+    if workers < 1 or workers > 100:
+        raise ValueError("workers must be between 1 and 100.")
+    if max_iterations < 0 or max_iterations > 50:
+        raise ValueError("max_iterations must be between 0 and 50.")
 
 class PromptWorkflowRequest(BaseModel):
     prompt: str
@@ -59,6 +66,10 @@ async def analyze_bpmn(
     """Executes the full 10-stage BPMN analysis and iterative optimization pipeline."""
     if not file.filename.lower().endswith(('.xml', '.bpmn')):
         raise HTTPException(status_code=400, detail="Only .xml or .bpmn workflow files are accepted.")
+    try:
+        _validate_request(workers, max_iterations)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     try:
         content_bytes = await file.read()
@@ -66,11 +77,10 @@ async def analyze_bpmn(
 
         # 1. Parse BPMN XML
         parsed = BPMNParser.parse(xml_content)
-        if not parsed['tasks']:
-            raise ValueError("No executable tasks found in the uploaded BPMN XML.")
-
         # 2. Workflow Modeling
         wf = WorkflowGraph(parsed)
+        petri_net = PetriNet.from_workflow(wf)
+        petri_analysis = PetriNetAnalyzer(petri_net).explore_state_space()
 
         # 3-9. Petri-Net Conversion, Verification, Simulation, Problem Identification & Optimization
         optimizer = IterativeOptimizer(wf, base_resources=workers, max_iterations=max_iterations)
@@ -98,6 +108,8 @@ async def analyze_bpmn(
             "best_iteration": result['best_iteration'],
             "best_strategy": result['best_strategy'],
             "optimized_bpmn_xml": result['optimized_bpmn_xml'],
+            "petri_net": petri_net.to_dict(),
+            "petri_net_analysis": petri_analysis,
             "initial_bpmn_xml": xml_content,
             "report_download_url": "/download-report",
             "bpmn_download_url": "/download-optimized-bpmn"
@@ -113,15 +125,17 @@ async def prompt_to_workflow(req: PromptWorkflowRequest):
     """Understands natural language prompt, generates BPMN 2.0 XML,
     and automatically feeds it directly into the analysis & optimization pipeline."""
     try:
+        if not req.prompt.strip():
+            raise ValueError("prompt cannot be empty.")
+        _validate_request(req.workers, req.max_iterations)
         xml_content = ProcessNLPGenerator.generate_bpmn_xml(req.prompt)
 
         # 1. Parse generated BPMN XML
         parsed = BPMNParser.parse(xml_content)
-        if not parsed['tasks']:
-            raise ValueError("No activities could be parsed from the generated workflow.")
-
         # 2. Workflow Modeling
         wf = WorkflowGraph(parsed)
+        petri_net = PetriNet.from_workflow(wf)
+        petri_analysis = PetriNetAnalyzer(petri_net).explore_state_space()
 
         # 3-9. Petri-Net Conversion, Verification, Simulation & Iterative Optimization
         optimizer = IterativeOptimizer(wf, base_resources=req.workers, max_iterations=req.max_iterations)
@@ -149,11 +163,15 @@ async def prompt_to_workflow(req: PromptWorkflowRequest):
             "best_iteration": result['best_iteration'],
             "best_strategy": result['best_strategy'],
             "optimized_bpmn_xml": result['optimized_bpmn_xml'],
+            "petri_net": petri_net.to_dict(),
+            "petri_net_analysis": petri_analysis,
             "initial_bpmn_xml": xml_content,
             "report_download_url": "/download-report",
             "bpmn_download_url": "/download-optimized-bpmn"
         })
 
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -163,10 +181,40 @@ async def prompt_to_workflow(req: PromptWorkflowRequest):
 async def generate_xml_only(req: PromptWorkflowRequest):
     """Generates only the BPMN 2.0 XML from natural language prompt."""
     try:
+        if not req.prompt.strip():
+            raise ValueError("prompt cannot be empty.")
         xml = ProcessNLPGenerator.generate_bpmn_xml(req.prompt)
         return JSONResponse(content={"status": "success", "xml": xml})
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/convert-to-petri-net")
+async def convert_to_petri_net(file: UploadFile = File(...)):
+    """Convert an uploaded BPMN/XML document and return its Petri-net model."""
+    if not file.filename or not file.filename.lower().endswith(('.xml', '.bpmn')):
+        raise HTTPException(status_code=400, detail="Only .xml or .bpmn workflow files are accepted.")
+    try:
+        xml_content = (await file.read()).decode('utf-8-sig')
+        parsed = BPMNParser.parse(xml_content)
+        workflow = WorkflowGraph(parsed)
+        net = PetriNet.from_workflow(workflow)
+        verification = PetriNetAnalyzer(net).explore_state_space()
+        return JSONResponse(content={
+            'status': 'success',
+            'workflow': {
+                'tasks': parsed['tasks'],
+                'gateways': parsed['gateways'],
+                'events': parsed['events'],
+                'sequence_flows': parsed['flows'],
+            },
+            'petri_net': net.to_dict(),
+            'verification': verification,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 

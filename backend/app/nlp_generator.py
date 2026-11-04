@@ -8,8 +8,7 @@ Interprets natural language business process descriptions, extracts:
 - Sequence Flows & Precedence Dependencies
 - Complete BPMN 2.0 XML with full BPMNDI (Shapes, Bounds, Edges, Waypoints)
 
-Supports both external LLM APIs (OpenAI / Gemini if configured) and a
-built-in deterministic Natural Language Process Synthesizer for 100% offline reliability.
+Prompt generation uses a configured OpenAI-compatible model endpoint.
 """
 
 import re
@@ -23,62 +22,69 @@ class ProcessNLPGenerator:
 
     @classmethod
     def generate_bpmn_xml(cls, text_prompt: str) -> str:
-        """Main entry point: tries LLM API if key is available, otherwise uses built-in NLP engine."""
+        """Generate and validate BPMN using the configured model."""
         prompt_clean = text_prompt.strip()
         if not prompt_clean:
             raise ValueError("Process prompt description cannot be empty.")
 
-        # Check for OpenAI API key if available
-        openai_key = os.environ.get("OPENAI_API_KEY")
-        if openai_key:
-            try:
-                xml = cls._generate_via_openai(prompt_clean, openai_key)
-                if xml and "<bpmn:definitions" in xml:
-                    return xml
-            except Exception as e:
-                print(f"[NLP Engine] OpenAI call failed ({e}), falling back to built-in generator.")
-
-        # Built-in deterministic NLP Process Understanding & BPMN 2.0 Synthesizer
-        return cls._synthesize_from_text(prompt_clean)
+        api_key = os.environ.get("MAKEREND_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("MAKEREND_API_KEY is not configured.")
+        xml = cls._generate_via_openai(prompt_clean, api_key)
+        try:
+            root = ET.fromstring(xml)
+        except (ET.ParseError, TypeError) as exc:
+            raise RuntimeError("The model returned invalid BPMN XML.") from exc
+        if root.tag != "{http://www.omg.org/spec/BPMN/20100524/MODEL}definitions":
+            raise RuntimeError("The model response is not a BPMN 2.0 definitions document.")
+        return xml
 
     @classmethod
     def _generate_via_openai(cls, prompt: str, api_key: str) -> Optional[str]:
-        """Calls OpenAI API to generate valid BPMN 2.0 XML."""
+        """Call the configured OpenAI-compatible API to generate BPMN XML."""
         import urllib.request
+        import urllib.error
         import json
 
         system_msg = (
             "You are an expert BPMN 2.0 architect. Generate valid, compliant BPMN 2.0 XML with "
             "complete BPMNDI diagram interchange (dc:Bounds, bpmndi:BPMNShape, bpmndi:BPMNEdge with di:waypoint). "
-            "Include startEvent, tasks with documentation specifying duration in units, parallelGateway or exclusiveGateway "
-            "where appropriate, and endEvent. Return ONLY the raw XML string, no markdown fences."
+            "Preserve the described sequence, parallelism and decisions faithfully. Include start and end events, "
+            "sequence flows, and task documentation specifying duration and resource when known. "
+            "Do not invent process steps or assume tasks run in parallel. Return only raw XML, without markdown."
         )
 
         payload = {
-            "model": "gpt-4o-mini",
+            "model": os.environ.get("MAKEREND_MODEL", "gpt-6.1-terra"),
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": f"Generate BPMN 2.0 XML for this business process:\n{prompt}"}
             ],
-            "temperature": 0.2
         }
 
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            os.environ.get("MAKEREND_BASE_URL", "https://makerend.com/v1").rstrip('/') + "/chat/completions",
             data=json.dumps(payload).encode('utf-8'),
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}"
             }
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
             raw_text = data['choices'][0]['message']['content'].strip()
             # Clean markdown code blocks if present
             if raw_text.startswith("```"):
                 raw_text = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text)
                 raw_text = re.sub(r"\n?```$", "", raw_text)
             return raw_text.strip()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise RuntimeError("Makerend model is unavailable for this API key; check the model name and token channel settings.") from exc
+            raise RuntimeError(f"Makerend request failed with HTTP {exc.code}; check the API configuration and provider availability.") from exc
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, IndexError, AttributeError) as exc:
+            raise RuntimeError("Makerend BPMN generation failed; check the API configuration and provider availability.") from exc
 
     @classmethod
     def _synthesize_from_text(cls, text: str) -> str:
@@ -140,14 +146,13 @@ class ProcessNLPGenerator:
             })
             task_id_counter += 1
 
-        # Fallback if too few tasks extracted
+        # If only a single activity is found, preserve it and create a process
+        # with one task rather than silently replacing the user's description.
         if len(extracted_tasks) < 2:
-            extracted_tasks = [
-                {'id': 'Task_1', 'name': 'Verify Request Details', 'duration': 2.0, 'resource': 'Worker_1'},
-                {'id': 'Task_2', 'name': 'Process Workflow Execution', 'duration': 3.0, 'resource': 'Worker_2'},
-                {'id': 'Task_3', 'name': 'Perform Quality Review', 'duration': 2.5, 'resource': 'Worker_1'}
+            extracted_tasks = extracted_tasks or [
+                {'id': 'Task_1', 'name': 'Process Request', 'duration': 2.0, 'resource': 'Worker_1'}
             ]
-            is_parallel_workflow = True
+            is_parallel_workflow = False
 
         # Limit to 5 tasks for clean, readable diagram layout
         if len(extracted_tasks) > 5:

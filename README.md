@@ -9,7 +9,7 @@ The system accepts either:
 - a BPMN/XML workflow file, or
 - a natural-language description of a business process.
 
-It then converts the workflow into an internal model, performs workflow analysis and optimization, compares the original and optimized workflows, and generates an optimized BPMN file together with a detailed PDF report.
+It then converts the workflow into an internal model, performs bounded workflow verification and timed simulation, compares scheduling/capacity scenarios, and generates an analyzed BPMN file together with a detailed PDF report.
 
 ---
 
@@ -43,7 +43,7 @@ The workflow can be analyzed using Petri-Net concepts to study properties such a
 - synchronization
 - concurrency
 - deadlocks
-- workflow soundness
+- bounded reachability and deadlock checks (truncation is reported as inconclusive)
 
 ### Timed Workflow Simulation
 
@@ -66,22 +66,22 @@ The system identifies possible workflow problems such as:
 - resource conflicts
 - inefficient resource allocation
 
-### Iterative Optimization
+### Candidate Scenario Comparison
 
-OptiModel performs multiple optimization cycles and attempts to improve workflow performance.
+OptiModel evaluates a bounded number of scheduling and worker-capacity scenarios. These are simulation candidates, not changes deployed to the submitted BPMN model.
 
 The system keeps track of:
 
-- optimization iteration
+- candidate iteration
 - strategy used
 - makespan
 - waiting time
 - best iteration
-- best optimization strategy
+- best simulated candidate
 
 ### Performance Comparison
 
-The dashboard compares the **baseline workflow** with the **optimized workflow** using metrics such as:
+The dashboard compares the **baseline workflow** with the **best simulated candidate** using metrics such as:
 
 | Metric | Description |
 |---|---|
@@ -100,17 +100,17 @@ The dashboard compares the **baseline workflow** with the **optimized workflow**
 
 The frontend uses **bpmn-js** to visualize BPMN workflows directly in the browser.
 
-### Optimization Progress Visualization
+### Candidate Scenario Progress Visualization
 
-Optimization results across multiple iterations are displayed using charts so that changes in makespan and waiting time can be observed.
+Simulation results across candidate iterations are displayed using charts so that makespan and waiting-time changes can be observed.
 
 ### PDF Report Generation
 
-After analysis, OptiModel generates a comparative PDF report containing the workflow-analysis and optimization results.
+After analysis, OptiModel generates a comparative PDF report containing the workflow topology, bounded Petri-net verification results, and simulation results.
 
-### Optimized BPMN Export
+### Analyzed BPMN Export
 
-The optimized workflow can be downloaded as a `.bpmn` file for further editing or analysis using BPMN-compatible tools.
+The submitted BPMN model can be downloaded as a `.bpmn` file for further editing or analysis using BPMN-compatible tools. Candidate scheduling and capacity assumptions are not written into the model.
 
 ---
 
@@ -145,12 +145,12 @@ The optimized workflow can be downloaded as a `.bpmn` file for further editing o
                        Problem Detection
                                  │
                                  ▼
-                     Iterative Optimization
+                 Candidate Scenario Comparison
                                  │
                     ┌────────────┴────────────┐
                     │                         │
                     ▼                         ▼
-           Optimized BPMN XML          Comparative Metrics
+          Unchanged BPMN XML                Comparative Metrics
                     │                         │
                     └────────────┬────────────┘
                                  ▼
@@ -291,6 +291,20 @@ http://localhost:8000
 
 # Manual Setup
 
+PDF diagrams require the Graphviz `dot` executable in the backend's `PATH`
+(for example, install the `graphviz` system package on Ubuntu). Install the
+Python dependencies from `backend/requirements.txt` as well. The report renders
+the parsed BPMN topology and the Petri net used for verification as vector graphics.
+Very large diagrams are scaled to fit the page and may be difficult to read.
+
+Natural-language workflow generation uses Makerend's OpenAI-compatible API.
+Set `MAKEREND_API_KEY` in the backend process environment before starting it.
+The default model is `gpt-6.1-terra` and the default API base URL is
+`https://makerend.com/v1`; override these with `MAKEREND_MODEL` and
+`MAKEREND_BASE_URL` when needed. Prompts are sent to Makerend. If generation
+fails, the API reports an error instead of substituting a heuristic workflow.
+BPMN file uploads do not require an API key.
+
 If you do not want to use `run_all.bat`, the frontend and backend can be started manually.
 
 ## 1. Create Virtual Environment
@@ -401,12 +415,12 @@ and then disburse approved funds.
 Configure:
 
 - Resource Pool Capacity
-- Maximum Optimization Cycles
+- Maximum Candidate Cycles (the cap excludes the baseline measurement)
 
 Then select:
 
 ```text
-Generate & Optimize Workflow
+Generate & Analyze Workflow
 ```
 
 The application will:
@@ -426,9 +440,9 @@ Simulation
        ↓
 Bottleneck Detection
        ↓
-Iterative Optimization
+Candidate Scenario Comparison
        ↓
-Optimized Workflow
+Analyzed BPMN Model (unchanged from input)
 ```
 
 ---
@@ -462,7 +476,7 @@ frontend/1.xml
 frontend/2.xml
 ```
 
-Configure the number of workers and optimization iterations, then run the analysis.
+Configure the worker count and maximum number of candidate scenarios, then run the analysis. A baseline is always measured; candidate count never exceeds `max_iterations`.
 
 ---
 
@@ -472,7 +486,7 @@ After successful analysis, the dashboard displays several sections.
 
 ## Initial vs Final Metrics
 
-Compares the baseline workflow with the optimized workflow.
+Compares the baseline workflow with the best simulated scheduling/capacity candidate. No duration edits or capacity changes are represented as deployed optimization.
 
 ## Interactive BPMN Diagram
 
@@ -480,7 +494,7 @@ Displays the workflow graphically using BPMN notation.
 
 ## Iteration Progression
 
-Shows how optimization metrics change over multiple iterations.
+Shows metrics measured across candidate simulation scenarios.
 
 ## Execution Schedule & Resources
 
@@ -510,7 +524,7 @@ The FastAPI backend provides the following main endpoints.
 POST /analyze
 ```
 
-Accepts a BPMN/XML file and runs the complete analysis and optimization pipeline.
+Accepts a BPMN/XML file and runs bounded Petri-net checks, timed simulation, and candidate scenario comparisons.
 
 Parameters include:
 
@@ -519,6 +533,22 @@ file
 workers
 max_iterations
 ```
+
+---
+
+## Convert BPMN to a Petri Net
+
+```http
+POST /convert-to-petri-net
+```
+
+Accepts an uploaded `.bpmn` or `.xml` file and returns the parsed workflow,
+Petri-net places/transitions/arcs, initial and final markings, and reachability
+diagnostics as JSON. The converter supports tasks, start/end and intermediate
+events, parallel gateways, and exclusive gateways. Inclusive, event-based, and
+complex gateways are rejected explicitly. The timed optimizer currently
+requires an acyclic process; XOR branch-condition simulation and BPMN loops are
+not part of the optimization pipeline yet.
 
 ---
 
@@ -543,8 +573,8 @@ The endpoint:
 1. Generates BPMN XML.
 2. Parses the workflow.
 3. Performs analysis.
-4. Runs iterative optimization.
-5. Generates the optimized BPMN.
+4. Compares scheduling/capacity simulation candidates, up to `max_iterations`.
+5. Returns the supplied BPMN unchanged as the analyzed model.
 6. Generates the comparison report.
 
 ---
@@ -583,13 +613,13 @@ bpmn_workflow_analysis_report.pdf
 
 ---
 
-## Download Optimized BPMN
+## Download Analyzed BPMN
 
 ```http
 GET /download-optimized-bpmn
 ```
 
-Downloads:
+Downloads the submitted BPMN model unchanged:
 
 ```text
 optimized_workflow.bpmn
@@ -634,24 +664,24 @@ The optimizer can analyze factors such as:
 
 ---
 
-# Optimization Output
+# Analysis Output
 
 A successful analysis returns information including:
 
 ```text
 Baseline Metrics
-Optimized Metrics
+Best Candidate Metrics
 Baseline Schedule
-Optimized Schedule
+Best Candidate Schedule
 Iteration History
 Problems Identified
-Overall Improvement
+Observed Simulated Change
 Best Iteration
 Best Strategy
-Optimized BPMN XML
+Analyzed BPMN XML (unchanged)
 ```
 
-This makes it possible to compare the process before and after optimization.
+This makes it possible to compare the baseline with the selected simulation candidate; it does not imply process changes were deployed.
 
 ---
 
@@ -682,7 +712,7 @@ frontend/1.xml
 frontend/2.xml
 ```
 
-These are useful for testing the analysis and optimization pipeline without creating a new BPMN process manually.
+These are useful for testing the analysis and candidate simulation pipeline without creating a new BPMN process manually.
 
 ---
 
@@ -808,7 +838,7 @@ When developing new features, make sure both services are running.
 
 OptiModel is currently intended primarily for workflow analysis, experimentation, education, and optimization research.
 
-Results produced by heuristic optimization should be validated before using them for critical real-world business decisions.
+Results produced by bounded verification and simplified simulation should be independently validated before use in critical real-world business decisions.
 
 ---
 
@@ -841,11 +871,11 @@ Describe / Upload Process
           ↓
  Bottleneck Detection
           ↓
- Iterative Optimization
+ Candidate Scenario Comparison
           ↓
 Performance Comparison
           ↓
- Optimized BPMN + PDF
+ Unchanged BPMN + PDF Report
 ```
 
 The goal of the project is to make **BPMN workflow analysis and optimization easier to visualize, evaluate, and experiment with through a single interactive application**.

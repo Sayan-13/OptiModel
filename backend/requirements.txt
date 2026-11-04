@@ -5,3 +5,5 @@ reportlab
 python-multipart
 pydantic
 lxml
+graphviz
+svglib

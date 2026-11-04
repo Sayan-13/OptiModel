@@ -9,8 +9,10 @@ Generates comprehensive reports with:
 - Problem Diagnostics & Technical Conclusion
 """
 
+import math
 import os
 from typing import Dict, Any, List
+from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
@@ -21,125 +23,100 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.graphics.shapes import Drawing, Rect, Circle, Line, String, Polygon, Group
+from .report_diagrams import bpmn_graph, petri_graph, render_graph
 
 
 def _draw_workflow_bpmn_diagram(analysis_result: Dict[str, Any]) -> Drawing:
-    """Dynamically generates a high-resolution vector BPMN process diagram for the report."""
-    tasks = analysis_result.get('optimized_schedule', [])
-    if not tasks:
-        # Fallback task list
-        tasks = [{'name': 'Task A', 'duration': 2.0, 'resource': 'Worker_1'},
-                 {'name': 'Task B', 'duration': 3.0, 'resource': 'Worker_2'}]
+    """Return a neutral placeholder if parsed workflow topology is unavailable."""
+    drawing = Drawing(480, 100)
+    drawing.add(Rect(0, 0, 480, 100, rx=8, ry=8, fillColor=colors.HexColor('#F8FAFC'),
+                     strokeColor=colors.HexColor('#E2E8F0'), strokeWidth=1))
+    drawing.add(String(20, 50, "Workflow topology is unavailable", fontName="Helvetica-Oblique",
+                       fontSize=10, fillColor=colors.HexColor('#64748B')))
+    return drawing
 
-    n_tasks = len(tasks)
+
+def _draw_actual_workflow_diagram(analysis_result: Dict[str, Any]) -> Drawing:
+    """Draw the parsed BPMN topology rather than a synthesized example."""
+    workflow = analysis_result.get('workflow', {})
+    nodes = workflow.get('events', []) + workflow.get('gateways', []) + workflow.get('tasks', [])
+    flows = workflow.get('sequence_flows', workflow.get('flows', []))
+    if not nodes:
+        return _draw_workflow_bpmn_diagram(analysis_result)
+
+    incoming = {node['id']: 0 for node in nodes}
+    successors = {node['id']: [] for node in nodes}
+    for flow in flows:
+        if flow['sourceRef'] in successors and flow['targetRef'] in incoming:
+            successors[flow['sourceRef']].append(flow['targetRef'])
+            incoming[flow['targetRef']] += 1
+
+    # Assign a left-to-right rank while retaining branches on separate rows.
+    ranks = {}
+    frontier = [node['id'] for node in nodes if incoming[node['id']] == 0]
+    for node_id in frontier:
+        ranks[node_id] = 0
+    while frontier:
+        current = frontier.pop(0)
+        for target in successors[current]:
+            ranks[target] = max(ranks.get(target, 0), ranks[current] + 1)
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                frontier.append(target)
+    for node in nodes:
+        ranks.setdefault(node['id'], 0)
+
+    columns = {}
+    for node_id, rank in ranks.items():
+        columns.setdefault(rank, []).append(node_id)
+    col_count = max(columns) + 1
     canvas_w = 480
-    canvas_h = max(140, 60 + n_tasks * 42)
-    d = Drawing(canvas_w, canvas_h)
+    canvas_h = max(170, 70 + max(len(items) for items in columns.values()) * 58)
+    drawing = Drawing(canvas_w, canvas_h)
+    drawing.add(Rect(0, 0, canvas_w, canvas_h, rx=8, ry=8, fillColor=colors.HexColor('#F8FAFC'),
+                     strokeColor=colors.HexColor('#E2E8F0')))
+    positions = {}
+    for rank, ids in columns.items():
+        x = 45 + rank * ((canvas_w - 90) / max(1, col_count - 1))
+        spacing = canvas_h / (len(ids) + 1)
+        for index, node_id in enumerate(ids):
+            positions[node_id] = (x, canvas_h - (index + 1) * spacing)
 
-    # Background frame
-    d.add(Rect(0, 0, canvas_w, canvas_h, rx=8, ry=8, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0'), strokeWidth=1))
+    def arrow(x1, y1, x2, y2):
+        drawing.add(Line(x1, y1, x2, y2, strokeColor=colors.HexColor('#64748B'), strokeWidth=1))
+        angle = math.atan2(y2 - y1, x2 - x1)
+        size = 5
+        drawing.add(Polygon(points=[x2, y2,
+                                    x2 - size * math.cos(angle - 0.5), y2 - size * math.sin(angle - 0.5),
+                                    x2 - size * math.cos(angle + 0.5), y2 - size * math.sin(angle + 0.5)],
+                             fillColor=colors.HexColor('#64748B'), strokeColor=colors.HexColor('#64748B')))
 
-    y_center = canvas_h / 2.0
+    for flow in flows:
+        if flow['sourceRef'] not in positions or flow['targetRef'] not in positions:
+            continue
+        sx, sy = positions[flow['sourceRef']]
+        tx, ty = positions[flow['targetRef']]
+        arrow(sx + 28, sy, tx - 28, ty)
 
-    # Calculate Y positions for tasks
-    task_spacing = 38
-    total_task_h = (n_tasks - 1) * task_spacing
-    y_start_tasks = y_center + (total_task_h / 2.0)
-    task_ys = [y_start_tasks - i * task_spacing for i in range(n_tasks)]
-
-    x_start = 32
-    x_split = 95
-    x_task = 160
-    task_w = 150
-    task_h = 28
-    x_task_end = x_task + task_w
-    x_join = 370
-    x_end = 438
-
-    # Helper for arrow heads
-    def add_arrow_head(x, y, angle=0):
-        # Default right-pointing arrow
-        if angle == 0:
-            d.add(Polygon(points=[x, y, x - 6, y + 3.5, x - 6, y - 3.5], fillColor=colors.HexColor('#334155'), strokeColor=colors.HexColor('#334155')))
-        elif angle == 90:  # pointing up
-            d.add(Polygon(points=[x, y, x - 3.5, y - 6, x + 3.5, y - 6], fillColor=colors.HexColor('#334155'), strokeColor=colors.HexColor('#334155')))
-        elif angle == 270:  # pointing down
-            d.add(Polygon(points=[x, y, x - 3.5, y + 6, x + 3.5, y + 6], fillColor=colors.HexColor('#334155'), strokeColor=colors.HexColor('#334155')))
-
-    # 1. Start Event (Green Circle)
-    d.add(Circle(x_start, y_center, 14, fillColor=colors.HexColor('#DCFCE7'), strokeColor=colors.HexColor('#16A34A'), strokeWidth=2))
-    d.add(String(x_start - 10, y_center - 3.5, "Start", fontName="Helvetica-Bold", fontSize=7, fillColor=colors.HexColor('#166534')))
-
-    # Arrow: Start -> Split
-    d.add(Line(x_start + 14, y_center, x_split - 16, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-    add_arrow_head(x_split - 16, y_center)
-
-    # 2. Parallel Split Gateway (Amber Diamond with +)
-    gw_r = 16
-    d.add(Polygon(points=[x_split, y_center + gw_r, x_split + gw_r, y_center, x_split, y_center - gw_r, x_split - gw_r, y_center],
-                  fillColor=colors.HexColor('#FEF3C7'), strokeColor=colors.HexColor('#D97706'), strokeWidth=1.8))
-    # Plus icon
-    d.add(Line(x_split - 6, y_center, x_split + 6, y_center, strokeColor=colors.HexColor('#92400E'), strokeWidth=2))
-    d.add(Line(x_split, y_center - 6, x_split, y_center + 6, strokeColor=colors.HexColor('#92400E'), strokeWidth=2))
-    d.add(String(x_split - 12, y_center - 25, "AND Split", fontName="Helvetica", fontSize=6, fillColor=colors.HexColor('#78350F')))
-
-    # 3. Tasks and Branch Connectors
-    for idx, (t, ty) in enumerate(zip(tasks, task_ys)):
-        # Connector Split -> Task
-        if abs(ty - y_center) < 5:
-            d.add(Line(x_split + gw_r, y_center, x_task, ty, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            add_arrow_head(x_task, ty)
+    for node in nodes:
+        x, y = positions[node['id']]
+        category = node.get('type', '')
+        if category.endswith('Event'):
+            drawing.add(Circle(x, y, 14, fillColor=colors.HexColor('#DCFCE7' if category == 'startEvent' else '#FEE2E2'),
+                                strokeColor=colors.HexColor('#16A34A' if category == 'startEvent' else '#DC2626'), strokeWidth=2))
+        elif category.endswith('Gateway'):
+            drawing.add(Polygon(points=[x, y + 17, x + 17, y, x, y - 17, x - 17, y],
+                                fillColor=colors.HexColor('#FEF3C7'), strokeColor=colors.HexColor('#D97706'), strokeWidth=1.5))
         else:
-            mid_x = (x_split + x_task) / 2.0
-            d.add(Line(x_split + gw_r, y_center, mid_x, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            d.add(Line(mid_x, y_center, mid_x, ty, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            d.add(Line(mid_x, ty, x_task, ty, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            add_arrow_head(x_task, ty)
-
-        # Task Box
-        d.add(Rect(x_task, ty - task_h / 2.0, task_w, task_h, rx=6, ry=6,
-                   fillColor=colors.HexColor('#EFF6FF'), strokeColor=colors.HexColor('#2563EB'), strokeWidth=1.4))
-
-        # Task Labels
-        raw_name = t.get('name', f"Task {idx+1}")
-        clean_name = (raw_name[:24] + '...') if len(raw_name) > 24 else raw_name
-        d.add(String(x_task + 8, ty + 2, clean_name, fontName="Helvetica-Bold", fontSize=7.5, fillColor=colors.HexColor('#1E3A8A')))
-
-        meta_text = f"Dur: {t.get('duration', 1.0)}u  |  {t.get('resource', 'Worker_Pool')}"
-        d.add(String(x_task + 8, ty - 8, meta_text, fontName="Helvetica", fontSize=6.5, fillColor=colors.HexColor('#0369A1')))
-
-        # Connector Task -> Join
-        if abs(ty - y_center) < 5:
-            d.add(Line(x_task_end, ty, x_join - gw_r, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            add_arrow_head(x_join - gw_r, y_center)
-        else:
-            mid_x2 = (x_task_end + x_join) / 2.0
-            d.add(Line(x_task_end, ty, mid_x2, ty, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            d.add(Line(mid_x2, ty, mid_x2, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            d.add(Line(mid_x2, y_center, x_join - gw_r, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-            add_arrow_head(x_join - gw_r, y_center)
-
-    # 4. Parallel Join Gateway
-    d.add(Polygon(points=[x_join, y_center + gw_r, x_join + gw_r, y_center, x_join, y_center - gw_r, x_join - gw_r, y_center],
-                  fillColor=colors.HexColor('#FEF3C7'), strokeColor=colors.HexColor('#D97706'), strokeWidth=1.8))
-    d.add(Line(x_join - 6, y_center, x_join + 6, y_center, strokeColor=colors.HexColor('#92400E'), strokeWidth=2))
-    d.add(Line(x_join, y_center - 6, x_join, y_center + 6, strokeColor=colors.HexColor('#92400E'), strokeWidth=2))
-    d.add(String(x_join - 12, y_center - 25, "AND Join", fontName="Helvetica", fontSize=6, fillColor=colors.HexColor('#78350F')))
-
-    # Arrow: Join -> End
-    d.add(Line(x_join + gw_r, y_center, x_end - 15, y_center, strokeColor=colors.HexColor('#475569'), strokeWidth=1.5))
-    add_arrow_head(x_end - 15, y_center)
-
-    # 5. End Event (Crimson Double Circle)
-    d.add(Circle(x_end, y_center, 14, fillColor=colors.HexColor('#FEE2E2'), strokeColor=colors.HexColor('#DC2626'), strokeWidth=2))
-    d.add(Circle(x_end, y_center, 11, fillColor=colors.HexColor('#FEE2E2'), strokeColor=colors.HexColor('#DC2626'), strokeWidth=1))
-    d.add(String(x_end - 8, y_center - 3.5, "End", fontName="Helvetica-Bold", fontSize=7, fillColor=colors.HexColor('#991B1B')))
-
-    # Legend at bottom
-    d.add(String(12, 10, "BPMN 2.0 Elements:  (O) Events   [+] Parallel Gateways   [===] Optimized Activity Units",
-                 fontName="Helvetica-Oblique", fontSize=6.5, fillColor=colors.HexColor('#64748B')))
-
-    return d
+            drawing.add(Rect(x - 40, y - 15, 80, 30, rx=5, ry=5, fillColor=colors.HexColor('#EFF6FF'),
+                             strokeColor=colors.HexColor('#2563EB'), strokeWidth=1.2))
+        label = str(node.get('name') or node['id'])
+        label = label[:16] + '...' if len(label) > 19 else label
+        drawing.add(String(x - min(35, len(label) * 2.5), y - 3, label, fontName='Helvetica', fontSize=6.5,
+                           fillColor=colors.HexColor('#1E293B')))
+    drawing.add(String(12, 10, 'Parsed BPMN topology; arrows represent sequence flows', fontName='Helvetica-Oblique',
+                       fontSize=6.5, fillColor=colors.HexColor('#64748B')))
+    return drawing
 
 
 def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: str):
@@ -185,12 +162,13 @@ def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: s
     # ================= 1. EXECUTIVE SUMMARY =================
     elements.append(Paragraph("1. Executive Summary &amp; Objective", styles['SectionHeader']))
     elements.append(Paragraph(
-        "This quantitative technical report presents the results of an automated workflow analysis and iterative optimization "
-        "pipeline applied to the uploaded BPMN process model. The system parsed the BPMN XML, mapped the model to a formal "
-        "Petri net for state-space exploration, performed timed discrete-event simulation with resource constraints, identified execution "
-        f"inefficiencies, and applied {len(history)-1} targeted optimization iterations. "
-        f"Overall process completion time (makespan) was reduced from <b>{base_m['makespan']}</b> to <b>{opt_m['makespan']} time units</b>, "
-        f"achieving a <b>{analysis_result['overall_improvement_pct']}% overall performance improvement</b>.",
+        "This report summarizes automated workflow analysis and timed simulation of the supplied BPMN model. "
+        "It maps supported elements to a Petri net, explores its bounded state space and simulates task durations "
+        "with a simplified shared-worker model. It evaluated "
+        f"{len(history)-1} candidate iterations. "
+        f"The baseline simulated process completion time (makespan) was <b>{base_m['makespan']}</b>; "
+        f"the best simulated candidate measured <b>{opt_m['makespan']} time units</b>, "
+        f"a <b>{analysis_result['overall_improvement_pct']}% simulated change</b> under the configured worker-pool assumptions.",
         styles['Body']
     ))
     elements.append(Spacer(1, 4))
@@ -198,14 +176,29 @@ def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: s
     # ================= VISUAL BPMN DIAGRAM =================
     elements.append(Paragraph("2. Visual BPMN Workflow &amp; Execution Topology", styles['SectionHeader']))
     elements.append(Paragraph(
-        "The diagram below illustrates the synthesized process execution structure, showing the entry event, parallel branch gateways, "
-        "activity durations, assigned resource allocations, and synchronization completion points:",
+        "The diagram below is derived from parsed BPMN events, gateways, tasks and sequence flows:",
         styles['Body']
     ))
     elements.append(Spacer(1, 4))
-    elements.append(_draw_workflow_bpmn_diagram(analysis_result))
+    workflow = analysis_result.get('workflow', {})
+    if workflow.get('tasks'):
+        elements.append(render_graph(bpmn_graph(workflow)))
+    else:
+        elements.append(_draw_workflow_bpmn_diagram(analysis_result))
     elements.append(Spacer(1, 2))
-    elements.append(Paragraph("<i>Figure 1: Generated BPMN 2.0 Process Diagram &amp; Resource Allocation Topology</i>", styles['SmallCenter']))
+    elements.append(Paragraph("<i>Figure 1: Parsed BPMN topology</i>", styles['SmallCenter']))
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("Petri-net representation", styles['SectionHeader']))
+    elements.append(Paragraph(
+        "The converted net used for verification is shown below. Circles are places, rectangles are "
+        "transitions, and the dot marks the initial token. Exclusive gateways may map to multiple transitions.",
+        styles['Body']))
+    elements.append(Spacer(1, 4))
+    if workflow.get('tasks'):
+        elements.append(render_graph(petri_graph(workflow)))
+    else:
+        elements.append(_draw_workflow_bpmn_diagram(analysis_result))
+    elements.append(Paragraph("<i>Figure 2: Petri net and initial marking</i>", styles['SmallCenter']))
     elements.append(Spacer(1, 6))
 
     # ================= 3. INITIAL VS FINAL COMPARISON TABLE =================
@@ -224,16 +217,16 @@ def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: s
         return f"{diff:+.1f}%"
 
     comp_rows = [
-        ["Performance Metric", "Initial Workflow", "Optimized Workflow", "Improvement / Impact"],
-        ["Makespan (Total Execution Time)", f"{base_m['makespan']} time units", f"{opt_m['makespan']} time units", calc_pct_reduction(base_m['makespan'], opt_m['makespan']) + " reduction"],
+        ["Performance Metric", "Baseline", "Best Candidate", "Observed Change"],
+        ["Makespan (Total Execution Time)", f"{base_m['makespan']} time units", f"{opt_m['makespan']} time units", calc_pct_reduction(base_m['makespan'], opt_m['makespan']) + " simulated change"],
         ["Throughput", f"{base_m['throughput']} instances/unit", f"{opt_m['throughput']} instances/unit", calc_pct_increase(base_m['throughput'], opt_m['throughput']) + " throughput"],
         ["Resource Utilization", f"{base_m['resource_utilization']}%", f"{opt_m['resource_utilization']}%", f"{opt_m['resource_utilization'] - base_m['resource_utilization']:+.1f}% capacity shift"],
         ["Average Waiting Time", f"{base_m['average_waiting_time']} time units", f"{opt_m['average_waiting_time']} time units", calc_pct_reduction(base_m['average_waiting_time'], opt_m['average_waiting_time']) + " wait reduction"],
         ["Time Wasted (Idle + Queue)", f"{base_m['time_wasted']} time units", f"{opt_m['time_wasted']} time units", calc_pct_reduction(base_m['time_wasted'], opt_m['time_wasted']) + " waste eliminated"],
-        ["Maximum Concurrency", f"{base_m['maximum_concurrency']} activities", f"{opt_m['maximum_concurrency']} activities", "Preserved / Optimal"],
-        ["Reachable States", f"{base_m['reachable_states']} markings", f"{opt_m['reachable_states']} markings", "Consistent state-space"],
-        ["Deadlocks", f"{base_m['deadlocks']} states", f"{opt_m['deadlocks']} states", "0 Deadlocks (Sound)"],
-        ["Bottleneck Activity", str(base_m['bottlenecks']), str(opt_m['bottlenecks']), "Mitigated critical path"],
+        ["Maximum Concurrency", f"{base_m['maximum_concurrency']} activities", f"{opt_m['maximum_concurrency']} activities", "Estimated structural concurrency"],
+        ["Reachable States", f"{base_m['reachable_states']} markings", f"{opt_m['reachable_states']} markings", "Exploration count"],
+        ["Deadlocks", f"{base_m['deadlocks']} states", f"{opt_m['deadlocks']} states", "Exploration count"],
+        ["Bottleneck Activity", str(base_m['bottlenecks']), str(opt_m['bottlenecks']), "Observed candidate result"],
         ["Synchronization Overhead", f"{base_m['synchronization_overhead']} time units", f"{opt_m['synchronization_overhead']} time units", calc_pct_reduction(base_m['synchronization_overhead'], opt_m['synchronization_overhead']) + " join wait"],
         ["Resource Conflicts", f"{base_m['resource_conflicts']} queue events", f"{opt_m['resource_conflicts']} queue events", f"-{base_m['resource_conflicts'] - opt_m['resource_conflicts']} contention events"],
     ]
@@ -266,19 +259,26 @@ def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: s
     elements.append(Paragraph("4. Problem Diagnostics &amp; Formal Petri-Net Verification", styles['SectionHeader']))
     problems = analysis_result.get('problems_identified', [])
     for prob in problems:
-        elements.append(Paragraph(f"• <b>Identified Inefficiency:</b> {prob}", styles['Body']))
+        elements.append(Paragraph(f"• <b>Identified Inefficiency:</b> {escape(str(prob))}", styles['Body']))
     elements.append(Spacer(1, 3))
+    verification = analysis_result.get('net_analysis', {})
+    if verification.get('truncated'):
+        verification_status = 'inconclusive: state-space exploration was truncated'
+    elif verification.get('is_sound'):
+        verification_status = 'bounded soundness checks passed'
+    else:
+        verification_status = 'soundness checks did not pass'
     elements.append(Paragraph(
-        "<b>Formal Soundness Proof:</b> The Petri-net state-space exploration over all discrete markings confirmed that "
-        f"all {base_m['reachable_states']} reachable states are fully connected, with <b>0 deadlocks</b>. Every process instance "
-        "is guaranteed to terminate properly at the sink marking without leftover tokens.",
+        f"<b>Petri-net exploration:</b> {base_m['reachable_states']} markings explored; "
+        f"{base_m['deadlocks']} deadlock(s) detected. Result: <b>{verification_status}</b>. "
+        "This bounded exploration is not a general behavioral-correctness or production-readiness guarantee.",
         styles['Body']
     ))
     elements.append(Spacer(1, 6))
 
     # ================= 5. ITERATIVE OPTIMIZATION SUMMARY =================
-    elements.append(Paragraph("5. Iterative Optimization Progression", styles['SectionHeader']))
-    iter_rows = [["Cycle", "Strategy Applied", "Makespan", "Avg Wait", "Utilization", "Improvement", "Status"]]
+    elements.append(Paragraph("5. Candidate Simulation Progression", styles['SectionHeader']))
+    iter_rows = [["Cycle", "Candidate Scenario", "Makespan", "Avg Wait", "Utilization", "Change", "Status"]]
     for item in history:
         iter_rows.append([
             f"Iter {item['iteration']}",
@@ -362,11 +362,11 @@ def build_comparative_pdf_report(analysis_result: Dict[str, Any], output_path: s
     # ================= 7. CONCLUSION =================
     elements.append(Paragraph("7. Technical Conclusion", styles['SectionHeader']))
     elements.append(Paragraph(
-        f"The workflow analysis and optimization achieved significant performance acceleration. "
-        f"By resolving critical-path contention and balancing parallel branch durations, total makespan was compressed "
-        f"from <b>{base_m['makespan']} to {opt_m['makespan']} time units</b> ({analysis_result['overall_improvement_pct']}% improvement). "
-        f"Throughput increased to <b>{opt_m['throughput']} instances/unit</b> with average waiting time of <b>{opt_m['average_waiting_time']} time units</b>. "
-        "The generated workflow guarantees behavioral correctness, deadlock freedom, and is ready for production execution.",
+        f"The workflow analysis and scheduling/capacity candidates produced a simulated makespan "
+        f"from <b>{base_m['makespan']} to {opt_m['makespan']} time units</b> ({analysis_result['overall_improvement_pct']}% simulated change). "
+        f"The selected candidate had throughput of <b>{opt_m['throughput']} instances/unit</b> and average waiting time of <b>{opt_m['average_waiting_time']} time units</b>. "
+        "These results reflect the simulator's assumptions and do not constitute a behavioral-correctness "
+        "or production-readiness guarantee.",
         styles['Body']
     ))
     elements.append(Spacer(1, 10))
